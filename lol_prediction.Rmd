@@ -1,0 +1,264 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# load packages
+
+```{r}
+pacman::p_load(tidyverse, rvest, xml2, purrr)
+```
+
+# scraping player and team data
+
+```{r}
+url <- "https://oracleselixir.com/statistics/international/msi-2018-player-statistics/"
+
+
+get_stats <- function(digit) {
+  read_html(url) %>% 
+  html_nodes(paste0(".column-", digit)) %>% 
+  html_text()
+}
+
+
+player_stats <- 1:23 %>% 
+  map(get_stats)
+
+dumb_fun <- function(x) {
+  player_stats[[x]]
+}
+
+player_stats <- cbind(
+dumb_fun(1),
+dumb_fun(2),
+dumb_fun(3),
+dumb_fun(4),
+dumb_fun(5),
+dumb_fun(6),
+dumb_fun(7),
+dumb_fun(8),
+dumb_fun(9),
+dumb_fun(10),
+dumb_fun(11),
+dumb_fun(12),
+dumb_fun(13),
+dumb_fun(14),
+dumb_fun(15),
+dumb_fun(16),
+dumb_fun(17),
+dumb_fun(18),
+dumb_fun(19),
+dumb_fun(20),
+dumb_fun(21),
+dumb_fun(22),
+dumb_fun(23)
+)
+
+
+the_names <- player_stats %>% 
+  tbl_df() %>% 
+  .[1,] %>% 
+  as.character()
+
+player_stats %<>% 
+  tbl_df() %>% 
+  set_names(the_names) %>% 
+  filter(Player!="Player")
+
+save(player_stats, file = "data/player_stats.Rdata")
+```
+
+# load in match data
+
+```{r}
+library("openxlsx")
+matches <- read.xlsx("data/matches.xlsx", sheet = 1)
+
+matches
+
+matches %>% 
+  select(k)
+```
+
+# merging
+
+```{r}
+match_dat <- player_stats %>% 
+  janitor::clean_names() %>% 
+  mutate_at(vars(k, d, a, cspm, wpm, wcpm), as.numeric) %>% 
+  inner_join(matches %>% 
+     select(-k, -d, -a, -cspm, -wpm, -wcpm))
+
+
+match_dat %>% 
+  select_if(is.numeric) -> num_dat
+
+table(num_dat$result)
+
+ggheatmap <- function(.data) {
+  
+ library(reshape2)
+ 
+ cormat <- round(cor(.data, use = "pairwise.complete.obs"),3)
+ 
+ # Get upper triangle of the correlation matrix
+ get_upper_tri <- function(cormat){
+     cormat[lower.tri(cormat)] <- NA
+     return(cormat)
+   }
+ 
+ reorder_cormat <- function(cormat){
+ # Use correlation between variables as distance
+ dd <- as.dist((1-cormat)/2)
+ hc <- hclust(dd)
+ cormat <- cormat[hc$order, hc$order]
+ }
+ 
+ # Reorder the correlation matrix
+ #cormat <- reorder_cormat(cormat)
+ upper_tri <- get_upper_tri(cormat)
+ # Melt the correlation matrix
+ melted_cormat <- melt(upper_tri, na.rm = TRUE) %>% 
+   mutate(value = sprintf('%.2f', value, 2)) %>% 
+   mutate(value = as.numeric(value))
+ # Create a ggheatmap
+ ggplot(melted_cormat, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+     name="Pearson Correlation\n") +
+  ggthemes::theme_hc()+ # minimal theme
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+     size = 12, hjust = 1))+
+ # coord_fixed()  + 
+ geom_text(aes(Var2, Var1, label = value), color = "black", size = 4) +
+ theme(
+   axis.title.x = element_blank(),
+   axis.title.y = element_blank(),
+   panel.grid.major = element_blank(),
+   panel.border = element_blank(),
+   panel.background = element_blank(),
+   axis.ticks = element_blank(),
+   legend.justification = c(1, 0),
+   legend.position = c(0.7, 0.8),
+   legend.title = element_text(size = 20),
+   axis.ticks.length = unit(2, "cm"),
+   legend.direction = "horizontal")+
+   guides(fill = guide_colorbar(barwidth = 30, barheight = 1.5,
+                 title.position = "top", title.hjust = 0.5))
+}
+
+
+num_dat %<>% 
+  select(result) %>%
+  cbind(num_dat %>% 
+  select(-result))
+
+library(magrittr)
+
+num_dat %<>% 
+  select(-heraldtime)
+
+ggheatmap(num_dat)
+
+ggsave(filename = "images/heatmap.png", width = 32, height = 22)
+
+va_corrs <- cor(num_dat, use = "pairwise.complete.obs") %>% 
+  tbl_df() %>% 
+  .[1,] %>% 
+  t() %>% 
+  data.frame(cor = .) %>% 
+  rownames_to_column("variable") %>% 
+  tbl_df %>% 
+#  filter(variable != "result") %>% 
+  arrange(desc(cor))
+
+
+selector <- va_corrs %>% 
+  filter(cor > 0.10) %>% 
+  .$variable
+
+# glm_dat <- num_dat %>% 
+#   select_(selector)
+
+glm_dat <- num_dat[,selector]
+
+mod1 <- glm(result ~ ., glm_dat, family = "binomial")
+
+
+sjPlot::plot_model(mod1, sort.est = "sort.all", show.values = T, show.p = T)
+
+
+sjPlot::plot_model(mod1, type = "pred", terms = c("firstmidouter", "teamkills"))
+
+sjPlot::plot_model(mod1, type = "pred", terms = c("teamkills", "firstmidouter"))
+
+sjPlot::plot_model(mod1, type = "pred", terms = c("firstmidouter"))
+
+options(scipen=999)
+
+conf_dat <- data.frame(predict = predict(mod1, newdata = glm_dat, type = "response")) %>% 
+  mutate(predict_glm = ifelse(predict > 0.5, 1, 0)) %>% 
+  cbind(glm_dat)
+
+library(caret)
+
+caret::confusionMatrix(conf_dat %>% 
+                         select(result, predict_glm) %>% 
+                         table())
+
+na.omit(num_dat) 
+
+
+
+ml_dat <- match_dat[,c("player", "team", "gameid", selector)]
+
+
+ml_dat %<>% 
+  group_by(team, gameid) %>% 
+  summarise_if(is.numeric, mean) %>% 
+  ungroup() %>% 
+  select_if(is.numeric)
+# glmer
+
+library(lme4)
+
+mod2 <- glm(result ~ ., ml_dat, family = "binomial")
+
+
+
+
+sjPlot::plot_model(mod2, sort.est = "sort.all", show.values = T, show.p = T)
+
+
+sjPlot::plot_model(mod2, type = "pred", terms = c("firstmidouter", "teamkills"))
+
+sjPlot::plot_model(mod2, type = "pred", terms = c("teamkills", "firstmidouter"))
+
+sjPlot::plot_model(mod2, type = "pred", terms = c("firstmidouter"))
+
+
+conf_dat <- data.frame(predict = predict(mod2, newdata = ml_dat, type = "response")) %>% 
+  mutate(predict_glm = ifelse(predict > 0.5, 1, 0)) %>% 
+  cbind(ml_dat)
+
+library(caret)
+
+caret::confusionMatrix(conf_dat %>% 
+                         select(result, predict_glm) %>% 
+                         table())
+
+table(ml_dat$result)
+
+
+match_dat %>% 
+  filter(team == "Flash Wolves")
+
+
+
+set.seed(7)
+fit.lda <- train(Species~., data=dataset, method="lda", metric=metric, trControl=control)
+
+```
+
