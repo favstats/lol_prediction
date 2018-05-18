@@ -1,0 +1,304 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+## load packages
+
+```{r}
+pacman::p_load(tidyverse, rvest, xml2, purrr, dplyr, stringr)
+```
+
+
+
+## Data
+
+### scraping player and team data
+
+
+```{r}
+url <- "https://oracleselixir.com/statistics/international/msi-2018-player-statistics/"
+
+player_stats <- url %>% 
+  read_html %>% 
+  html_node("table") %>% 
+  html_table() %>%
+  as_tibble() %>%
+  janitor::clean_names()
+```
+
+
+```{r}
+matches_url <- "http://oracleselixir.com/gamedata/2018-spring/"
+
+
+match_stats <- dir("data") %>%
+  stringr::str_detect("matches") %>%
+  dir("data")[.] %>%
+  paste0("data/", .) %>%
+  as.list() %>%
+  purrr::map(
+    ~read.xlsx(.x, sheet = 1) %>% 
+      mutate_all(as.character)
+  ) %>%
+  purrr::reduce(bind_rows) %>% 
+  as_tibble()
+
+match_stats %>% glimpse
+
+match_stats$player[1]
+
+
+
+grouped_match <- match_stats %>% 
+  group_by(team, side) %>%
+  count(gameid) %>%
+  #arrange(gameid) %>% 
+  ungroup() %>%
+  select(-n)  
+
+event_dat <- grouped_match %>% 
+  filter(side == "Blue") %>% 
+  select(blue_team = team, gameid) %>% 
+  left_join(grouped_match %>% 
+    filter(side == "Red") %>% 
+    select(red_team = team, gameid), by = "gameid") %>% 
+  select(gameid, blue_team, red_team) 
+
+
+name_vars <- function(.data, side) {
+  cols <- colnames(.data)[-1]
+  colnames(.data)[-1] <- paste0(side, "_", cols)
+  return(.data)
+}
+
+event_dat
+
+
+#match_stats %>% 
+
+library(magrittr)
+
+check_nums <- function(x) {
+  #if(str_detect(x, "Thieves") %>% any()) return(x)
+  out <- str_detect(x, "\\d") %>% any()
+  if(out) x <- as.numeric(x)
+  return(x)
+}
+
+
+
+blue_dat <- match_stats %>% 
+  filter(side == "Blue") %>%
+  select(gameid, team, goldspent, teamkills, result) %>% 
+  mutate_at(vars(-team), check_nums) %>% 
+  group_by(gameid, team, result) %>%
+  summarise_all(~mean(., na.rm = T)) %>% 
+  name_vars("blue")
+
+  blue_dat$blue_result %>% table
+
+red_dat <- match_stats %>% 
+  filter(side == "Red") %>%
+  select(gameid, team, goldspent, teamkills, result) %>% 
+  mutate_at(vars(-team), check_nums) %>% 
+  group_by(gameid, team, result) %>%
+  summarise_all(~mean(., na.rm = T)) %>% 
+  name_vars("red")
+
+
+predict_dat <- event_dat %>% 
+  mutate(gameid = gameid %>% as.numeric) %>% 
+  left_join(blue_dat) %>% 
+  left_join(red_dat)
+
+#save(predict_dat, file = "data/predict_dat.Rdata")
+```
+
+
+## data prep
+
+```{r}
+range01 <- function(x){(x-min(x, na.rm = T))/(max(x, na.rm = T)-min(x, na.rm = T))}
+```
+
+
+## h20 predict
+
+```{r}
+library(h2o)
+
+h2o::h2o.init()
+
+final_dat <- predict_dat %>% 
+  select(-gameid, -red_result) %>% 
+  mutate_if(is.numeric, range01) %>% 
+  mutate(blue_result = as.factor(blue_result))
+
+y <- "blue_result"
+x <- setdiff(colnames(final_dat), y)
+
+
+dat <- tidyMBO::split_data(final_dat %>% mutate(index=1:n()), .8)
+
+mod_gbm <- h2o.gbm(
+  x = x,
+  y = y,
+  training_frame = as.h2o(dat$train),
+  distribution = "bernoulli"
+)
+
+h2o.varimp(mod_gbm)
+
+preds <- h2o.predict(mod_gbm, newdata = as.h2o(dat$test))
+
+table(as.vector(preds$predict), dat$test$blue_result)
+
+
+preds %>% as_tibble %>% 
+  bind_cols(dat$test,.) %>%
+  filter(blue_team == "Royal Never Give Up")
+
+predict_dat$blue_result %>% table()
+
+
+dat$test[1,] %>% glimpse
+
+preds <- h2o.predict(mod_gbm, newdata = as.h2o(tibble(blue_team = "Royal Never Give Up", red_team = "Fnatic", blue_result = NA,  blue_goldspent = NA, blue_teamkills = NA, red_goldspent = NA, red_teamkills = NA)))
+
+preds <- h2o.predict(mod_gbm, newdata = as.h2o(tibble(blue_team = "KINGZONE DragonX", red_team = "Flash Wolves", blue_result = NA,  blue_goldspent = NA, blue_teamkills = NA, red_goldspent = NA, red_teamkills = NA)))
+
+```
+
+
+##
+
+* scarpe match stats https://matchhistory.na.leagueoflegends.com/en/#match-details/NA1/2784782482/228471144?tab=overview
+* personal history https://matchhistory.na.leagueoflegends.com/en/#match-history/NA1/228471144
+
+
+## API
+
+
+```{r}
+# devtools::install_github("stillmatic/leagueR")
+library(leagueR)
+key <- "RGAPI-7dc56bea-cc11-4014-8124-85c7b45c9340"
+leagueR::set_riot_key(key)
+```
+
+
+```{r}
+get_match <- function (match, region) 
+{
+  match_url <- create_query(match = match, region = region, 
+    version = paste(region, "v3", sep = "/"))
+  jsonlite::fromJSON(match_url)
+}
+
+ch <- leagueR::get_match("1160150", "euw1")
+leagueR::get_featured_games()
+
+
+```
+
+
+## GET
+
+```{r}
+get_content <- function(endpoint){
+  out <- paste0(api_url, endpoint) %>%
+    GET(., add_headers(Authorization = paste("Bearer", api_token, sep = " "))) %>%
+    content(., "text") %>%
+    jsonlite::fromJSON(.)
+  
+  return(out$data)
+}
+```
+
+```{r}
+spmonks <- list()
+```
+
+
+```{r}
+continents <- function(){
+  cat("\nWith this endpoint you are able to retrieve a list of continents.")
+  get_content("continents")
+}
+
+spmonks$continents <- continents()
+```
+
+
+
+```{r}
+end <- "lol/summoner/v3/summoners/by-name/favstats"
+api_url <- "https://euw1.api.riotgames.com/"
+
+
+get_content <- function(endpoint){
+  endpoint %>% 
+    paste0(api_url, .) %>%
+    paste0(., "?api_key=") %>% 
+    paste0(., key) %>% 
+    httr::GET()%>%
+    httr::content(., "text") %>%
+    jsonlite::fromJSON(.)
+}
+
+get_content(end)
+```
+
+* https://developer.riotgames.com/regional-endpoints.html
+* [python scraper](https://github.com/MatejLanPythonProgramming/League-of-Legends-MatchID-dataset-V1.0)
+
+
+```{r}
+get_content("lol/match/v3/matches/2898388927")
+
+get_content("lol/static-data/v3/champions")
+
+get_content("lol/match/v3/matchlists/by-account/224573647")
+
+get_content("lol/tournament/v3/codes")
+
+nn <- get_content("lol/spectator/v3/featured-games")
+nn$gameList  %>% glimpse 
+nn$gameList$gameId 
+
+
+game_seq <- 2858388927:2998388927
+
+get_content_safe <- safely(get_content)
+
+n1 <- game_seq[1:10] %>% 
+  as.list() %>% 
+  purrr::map(~{
+    paste0("lol/match/v3/matches/", .x) %>% 
+    get_content_safe()
+  })
+
+
+n1 %>%  map("result")
+
+
+
+#get_content("lol/match/v3/timelines/by-match/3635013843")
+```
+
+
+ID	NAME
+0	PRESEASON 3
+1	SEASON 3
+2	PRESEASON 2014
+3	SEASON 2014
+4	PRESEASON 2015
+5	SEASON 2015
+6	PRESEASON 2016
+7	SEASON 2016
+8	PRESEASON 2017
+9	SEASON 2017
+10	PRESEASON 2018
+11	SEASON 2018
