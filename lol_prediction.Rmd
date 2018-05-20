@@ -88,7 +88,8 @@ match_dat <- player_stats %>%
   janitor::clean_names() %>% 
   mutate_at(vars(k, d, a, cspm, wpm, wcpm), as.numeric) %>% 
   inner_join(matches %>% 
-     select(-k, -d, -a, -cspm, -wpm, -wcpm))
+     select(-k, -d, -a, -cspm, -wpm, -wcpm)) %>% 
+  as_tibble()
 
 
 match_dat %>% 
@@ -223,7 +224,7 @@ ml_dat %<>%
 # glmer
 
 library(lme4)
-
+ 
 mod2 <- glm(result ~ ., ml_dat, family = "binomial")
 
 
